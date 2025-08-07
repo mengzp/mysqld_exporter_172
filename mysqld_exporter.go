@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -65,6 +66,7 @@ var (
 	c            = config.MySqlConfigHandler{
 		Config: &config.Config{},
 	}
+	slowLogPath string
 )
 
 // scrapers lists all possible collection methods and if they should be enabled by default.
@@ -105,8 +107,8 @@ var scrapers = map[collector.Scraper]bool{
 	collector.ScrapeSlaveHosts{}:                          false,
 	collector.ScrapeReplicaHost{}:                         false,
 	collector.ScrapeBackupStatSchema{}:                    false,
-	collector.ScrapePerfReplicationGroupNodeMembers{}:     true,
-	collector.ScrapePerfReplicationGroupTrans{}:           true,
+	collector.ScrapePerfReplicationGroupNodeMembers{}:     false,
+	collector.ScrapePerfReplicationGroupTrans{}:           false,
 }
 
 func filterScrapers(scrapers []collector.Scraper, collectParams []string) []collector.Scraper {
@@ -213,6 +215,26 @@ func newHandler(scrapers []collector.Scraper, logger *slog.Logger) http.HandlerF
 		h.ServeHTTP(w, r)
 	}
 }
+func handleMySQLConfig(logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		configPath := "/etc/my.cnf" // 默认路径
+		if r.URL.Query().Get("path") != "" {
+			configPath = r.URL.Query().Get("path")
+		}
+
+		config, err := readMySQLConfig(configPath)
+		if err != nil {
+			logger.Error("Failed to read MySQL config", "path", configPath, "err", err)
+			http.Error(w, fmt.Sprintf("Error reading %s: %v", configPath, err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(config); err != nil {
+			logger.Error("Failed to encode MySQL config", "err", err)
+		}
+	}
+}
 
 func main() {
 	// Generate ON/OFF flags for all scrapers.
@@ -285,6 +307,8 @@ func main() {
 		}
 		_, _ = w.Write([]byte(`ok`))
 	})
+	http.Handle("/mysqlconfig", handleMySQLConfig(logger))
+	http.Handle("/slowlog", handleSlowlog(logger))
 	srv := &http.Server{}
 	if err := web.ListenAndServe(srv, toolkitFlags, logger); err != nil {
 		logger.Error("Error starting HTTP server", "err", err)
